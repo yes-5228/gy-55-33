@@ -22,6 +22,9 @@ def generate_pickup_code():
 
 @transaction.atomic
 def inbound_parcel(validated_data):
+    if Parcel.objects.filter(tracking_no=validated_data["tracking_no"]).exists():
+        raise ValidationError({"tracking_no": "该运单号已经入库。"})
+
     size = validated_data.pop("size", None)
     cells = LockerCell.objects.select_for_update().filter(status=LockerCell.Status.EMPTY)
     if size:
@@ -29,9 +32,6 @@ def inbound_parcel(validated_data):
     cell = cells.order_by("zone", "code").first()
     if not cell:
         raise ValidationError({"locker_cell": "没有可用柜格，请先释放或维护柜格。"})
-
-    if Parcel.objects.filter(tracking_no=validated_data["tracking_no"]).exists():
-        raise ValidationError({"tracking_no": "该运单号已经入库。"})
 
     parcel = Parcel.objects.create(
         **validated_data,
@@ -49,11 +49,17 @@ def open_by_pickup_code(pickup_code):
     parcel = (
         Parcel.objects.select_for_update()
         .select_related("locker_cell")
-        .filter(pickup_code=pickup_code, status=Parcel.Status.STORED)
+        .filter(pickup_code=pickup_code)
         .first()
     )
     if not parcel:
-        return None
+        raise ValidationError({"pickup_code": "取件码无效。"})
+
+    if parcel.status == Parcel.Status.RETURN_PENDING:
+        raise ValidationError({"pickup_code": "该快件正在退件中，暂不能取件。"})
+
+    if parcel.status != Parcel.Status.STORED:
+        raise ValidationError({"pickup_code": "该快件不可取件。"})
 
     now = timezone.now()
     parcel.status = Parcel.Status.PICKED_UP
@@ -61,7 +67,7 @@ def open_by_pickup_code(pickup_code):
     parcel.save(update_fields=["status", "picked_up_at"])
 
     cell = parcel.locker_cell
-    cell.status = LockerCell.Status.OPEN
+    cell.status = LockerCell.Status.EMPTY
     cell.last_opened_at = now
     cell.save(update_fields=["status", "last_opened_at", "updated_at"])
     return parcel

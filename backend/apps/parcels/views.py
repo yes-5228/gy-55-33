@@ -1,5 +1,6 @@
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from .models import Parcel
@@ -26,10 +27,12 @@ class ParcelViewSet(viewsets.ModelViewSet):
     def open(self, request):
         serializer = PickupCodeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        parcel = open_by_pickup_code(serializer.validated_data["pickup_code"])
-        if not parcel:
+        try:
+            parcel = open_by_pickup_code(serializer.validated_data["pickup_code"])
+        except ValidationError as e:
+            message = e.detail.get("pickup_code", ["取件失败"])[0] if isinstance(e.detail, dict) else str(e.detail)
             return Response(
-                {"success": False, "message": "取件码无效或快件不可取。"},
+                {"success": False, "message": str(message)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(

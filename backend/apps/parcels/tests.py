@@ -72,9 +72,9 @@ class InboundParcelTests(TestCase):
 
 class DuplicateTrackingNoTests(TestCase):
     def setUp(self):
-        LockerCell.objects.create(code="A001", zone="A区", size=LockerCell.Size.SMALL)
-        LockerCell.objects.create(code="A002", zone="A区", size=LockerCell.Size.SMALL)
-        LockerCell.objects.create(code="A003", zone="A区", size=LockerCell.Size.MEDIUM)
+        self.cell1 = LockerCell.objects.create(code="A001", zone="A区", size=LockerCell.Size.SMALL)
+        self.cell2 = LockerCell.objects.create(code="A002", zone="A区", size=LockerCell.Size.SMALL)
+        self.cell3 = LockerCell.objects.create(code="A003", zone="A区", size=LockerCell.Size.MEDIUM)
         self.data = {
             "tracking_no": "SF1234567890",
             "sender_name": "张三",
@@ -89,23 +89,48 @@ class DuplicateTrackingNoTests(TestCase):
             inbound_parcel(self.data.copy())
         self.assertIn("该运单号已经入库", str(ctx.exception))
 
-    def test_duplicate_tracking_no_cell_not_occupied(self):
-        initial_empty_count = LockerCell.objects.filter(
-            status=LockerCell.Status.EMPTY
-        ).count()
-        inbound_parcel(self.data.copy())
-        self.assertEqual(
-            LockerCell.objects.filter(status=LockerCell.Status.EMPTY).count(),
-            initial_empty_count - 1,
-        )
+    def test_duplicate_tracking_no_existing_parcel_unchanged(self):
+        original_parcel = inbound_parcel(self.data.copy())
+        original_cell_id = original_parcel.locker_cell_id
+        original_pickup_code = original_parcel.pickup_code
+        original_status = original_parcel.status
+        original_stored_at = original_parcel.stored_at
+
         try:
             inbound_parcel(self.data.copy())
         except ValidationError:
             pass
-        self.assertEqual(
-            LockerCell.objects.filter(status=LockerCell.Status.EMPTY).count(),
-            initial_empty_count - 1,
-        )
+
+        original_parcel.refresh_from_db()
+        self.assertEqual(original_parcel.locker_cell_id, original_cell_id)
+        self.assertEqual(original_parcel.pickup_code, original_pickup_code)
+        self.assertEqual(original_parcel.status, original_status)
+        self.assertEqual(original_parcel.stored_at, original_stored_at)
+
+    def test_duplicate_tracking_no_existing_cell_unchanged(self):
+        parcel = inbound_parcel(self.data.copy())
+        cell = LockerCell.objects.get(id=parcel.locker_cell_id)
+        self.assertEqual(cell.status, LockerCell.Status.OCCUPIED)
+
+        try:
+            inbound_parcel(self.data.copy())
+        except ValidationError:
+            pass
+
+        cell.refresh_from_db()
+        self.assertEqual(cell.status, LockerCell.Status.OCCUPIED)
+
+    def test_duplicate_tracking_no_other_cells_unchanged(self):
+        inbound_parcel(self.data.copy())
+        empty_count_before = LockerCell.objects.filter(status=LockerCell.Status.EMPTY).count()
+
+        try:
+            inbound_parcel(self.data.copy())
+        except ValidationError:
+            pass
+
+        empty_count_after = LockerCell.objects.filter(status=LockerCell.Status.EMPTY).count()
+        self.assertEqual(empty_count_before, empty_count_after)
 
 
 class PickupCodeTests(TestCase):
@@ -165,34 +190,48 @@ class OpenByPickupCodeTests(TestCase):
         self.assertEqual(parcel.status, Parcel.Status.PICKED_UP)
         self.assertIsNotNone(parcel.picked_up_at)
 
-    def test_open_by_pickup_code_cell_becomes_open(self):
+    def test_open_by_pickup_code_cell_becomes_empty(self):
         open_by_pickup_code("654321")
         self.cell.refresh_from_db()
-        self.assertEqual(self.cell.status, LockerCell.Status.OPEN)
+        self.assertEqual(self.cell.status, LockerCell.Status.EMPTY)
         self.assertIsNotNone(self.cell.last_opened_at)
 
     def test_open_by_pickup_code_status_linkage(self):
         parcel = open_by_pickup_code("654321")
         self.cell.refresh_from_db()
         self.assertEqual(parcel.status, Parcel.Status.PICKED_UP)
-        self.assertEqual(self.cell.status, LockerCell.Status.OPEN)
+        self.assertEqual(self.cell.status, LockerCell.Status.EMPTY)
 
     def test_open_by_pickup_code_invalid_code(self):
-        parcel = open_by_pickup_code("000000")
-        self.assertIsNone(parcel)
+        with self.assertRaises(ValidationError) as ctx:
+            open_by_pickup_code("000000")
+        self.assertIn("取件码无效", str(ctx.exception))
         self.cell.refresh_from_db()
         self.assertEqual(self.cell.status, LockerCell.Status.OCCUPIED)
 
     def test_open_by_pickup_code_already_picked_up(self):
         self.parcel.status = Parcel.Status.PICKED_UP
         self.parcel.save()
-        parcel = open_by_pickup_code("654321")
-        self.assertIsNone(parcel)
+        with self.assertRaises(ValidationError) as ctx:
+            open_by_pickup_code("654321")
+        self.assertIn("该快件不可取件", str(ctx.exception))
         self.cell.refresh_from_db()
         self.assertEqual(self.cell.status, LockerCell.Status.OCCUPIED)
 
     def test_open_by_pickup_code_return_pending(self):
         self.parcel.status = Parcel.Status.RETURN_PENDING
         self.parcel.save()
-        parcel = open_by_pickup_code("654321")
-        self.assertIsNone(parcel)
+        with self.assertRaises(ValidationError) as ctx:
+            open_by_pickup_code("654321")
+        self.assertIn("该快件正在退件中", str(ctx.exception))
+        self.cell.refresh_from_db()
+        self.assertEqual(self.cell.status, LockerCell.Status.OCCUPIED)
+
+    def test_open_by_pickup_code_returned_parcel(self):
+        self.parcel.status = Parcel.Status.RETURNED
+        self.parcel.save()
+        with self.assertRaises(ValidationError) as ctx:
+            open_by_pickup_code("654321")
+        self.assertIn("该快件不可取件", str(ctx.exception))
+        self.cell.refresh_from_db()
+        self.assertEqual(self.cell.status, LockerCell.Status.OCCUPIED)
