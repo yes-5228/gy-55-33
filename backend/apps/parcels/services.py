@@ -1,7 +1,7 @@
 import random
 from string import digits
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -33,11 +33,15 @@ def inbound_parcel(validated_data):
     if not cell:
         raise ValidationError({"locker_cell": "没有可用柜格，请先释放或维护柜格。"})
 
-    parcel = Parcel.objects.create(
-        **validated_data,
-        locker_cell=cell,
-        pickup_code=generate_pickup_code(),
-    )
+    try:
+        parcel = Parcel.objects.create(
+            **validated_data,
+            locker_cell=cell,
+            pickup_code=generate_pickup_code(),
+        )
+    except IntegrityError:
+        raise ValidationError({"tracking_no": "该运单号已经入库。"})
+
     cell.status = LockerCell.Status.OCCUPIED
     cell.save(update_fields=["status", "updated_at"])
     send_pickup_notification(parcel)
@@ -67,7 +71,10 @@ def open_by_pickup_code(pickup_code):
     parcel.save(update_fields=["status", "picked_up_at"])
 
     cell = parcel.locker_cell
-    cell.status = LockerCell.Status.EMPTY
+    cell.status = LockerCell.Status.OPEN
     cell.last_opened_at = now
     cell.save(update_fields=["status", "last_opened_at", "updated_at"])
+
+    cell.status = LockerCell.Status.EMPTY
+    cell.save(update_fields=["status", "updated_at"])
     return parcel
